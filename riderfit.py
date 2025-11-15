@@ -14,7 +14,7 @@ def rot(theta):
 	s = sin(theta)
 	return array(((c, -s), (s, c)))
 
-#Class for eacht bodypart.
+#Class for each bodypart.
 class Limb:
 	def __init__(
 		self,
