@@ -6,6 +6,8 @@ from numpy import array, sin, cos, arccos, dot
 from numpy.linalg import norm
 from render import Render
 from framebuild import Frame
+from collections import namedtuple
+from sys import stderr
 from pdb import set_trace as brk
 
 def rot(theta):
@@ -14,29 +16,43 @@ def rot(theta):
 	s = sin(theta)
 	return array(((c, -s), (s, c)))
 
-#Class for each bodypart.
-class Limb:
-	def __init__(
-		self,
-		start,
-		stop,
-		weight,
-		center_off_mass,
-		):
-		self.length = sqrt((start[0]-stop[0])**2 + (start[1]-stop[1])**2)
-		self.weight = weight
-		self.rel_com_pos = center_off_mass
+UPPERARM, LOWERARM, UPPERLEG, LOWERLEG, TORSO, HEAD = range(6)
 
-		self.pos_start = start
-		self.pos_stop = stop
-		self.com_pos = self.get_com()
+# For each body part, its centre of mass as a proportion of its height,
+# assuming it's dangling vertically down, and what fraction of the total mass
+# of the human body it is.
+PartData = namedtuple("PartData", "com mass")
+BODY_PARTS = {
+		UPPERARM: PartData(0.53, 0.053),
+		LOWERARM: PartData(0.57, 0.0504),
+		UPPERLEG: PartData(0.56, 0.2444),
+		LOWERLEG: PartData(0.57, 0.1222),
+		TORSO: PartData(0.56, 0.463),
+		HEAD: PartData(0.6, 0.0672),
+		}
 
-	def get_com(self):
-		dist_x = (self.pos_stop[0] - self.pos_start[0]) * self.rel_com_pos
-		dist_y = (self.pos_stop[1] - self.pos_start[1]) * self.rel_com_pos 
+class BodyPart:
+	def __init__(self, part, start, end):
+		"""part is one of the BODY_PARTS above. start and end are its actual
+		positions in 2D, projected into the plane of the bicycle"""
+		self.part_data = BODY_PARTS[part]
+		self.start = start
+		self.end = end
 
-		return (self.pos_start[0]+dist_x, self.pos_start[1]+dist_y)
+	def com(self):
+		"""Return the centre of mass in 2D space"""
+		return self.start + (self.end - self.start) * self.part_data.com
 
+	def mass(self):
+		"""Return mass (as a proportion of the whole body mass)"""
+		return self.part_data.mass
+
+def com(body_parts):
+	"""The centre of mass of a bunch of body parts"""
+	ret = array([0., 0.])
+	for bp in body_parts:
+		ret += bp.com() * bp.mass()
+	return ret
 
 class Rider:
 	def __init__(self, config):
@@ -93,45 +109,21 @@ class Rider:
 
 		offset = array([float(bike["bar reach"]), float(bike["bar stack"])])
 		self.top_of_ht = wrist - offset
-		self.center_of_mass_pos = self.center_of_mass()
 
-	# Calculates the riders center of mass / center of gravity. It calculates the weight of each bodypart, 
-	# together with each bodyparts center of mass. Afterwards the center of mass of these points is calculated, 
-	# wich is the com if the rider.
-	def center_of_mass(
-		self,
-		# com_pos_weight = weight distribution within the body. 
-		# Center of mass position is measured from ground up, when standing upright. 
-		# Tuple(center of mass position, weight proportional to complete body 
-		# (e.g. 0.3 = 30% of the bodys weight is in this in this bodypart))
-		com_pos_weight = { 
-				"upperarm" : (0.53,0.053),
-				"lowerarm" : (0.57,0.0504),
-				"upperleg" : (0.56,0.2444),
-				"lowerleg" : (0.57,0.1222),
-				"torso" : (0.56,0.463),
-				"head" : (0.6,0.0672),
-			},
-		weight=80. #irrelevant atm. Maybe useful, if the bikes weight is used as well?
-		):
-		foot = array([0, 0])
-		knee = array([self.hip[0]/2, self.hip[1]/2])
-		lowerleg = Limb(foot, knee, com_pos_weight["lowerleg"][1]*weight, com_pos_weight["lowerleg"][0])
-		upperleg = Limb(knee, self.hip, com_pos_weight["upperleg"][1]*weight, com_pos_weight["upperleg"][0])
-		torso = Limb(self.hip, self.shoulder, com_pos_weight["torso"][1]*weight, com_pos_weight["torso"][0])
-		upperarm = Limb(self.elbow, self.shoulder, com_pos_weight["upperarm"][1]*weight, com_pos_weight["upperarm"][0])
-		lowerarm = Limb(self.wrist, self.elbow, com_pos_weight["lowerarm"][1]*weight, com_pos_weight["lowerarm"][0])
-		head = Limb(self.shoulder, (self.shoulder[0], self.shoulder[1] + 30),com_pos_weight["head"][1]*weight, com_pos_weight["head"][0])
+		try:
+			height = float(rider["height"])
+		except KeyError:
+			height = snh + 300
+			print(f"Warning: rider height not provided. Estimating {height}mm",
+				file=stderr)
+		self.head_len = height - snh
 
-		com_x = 0
-		com_y = 0
-		mass = 0
-		for bodypart in [lowerleg, upperleg, torso, upperarm, lowerarm, head]:
-			com_x += (bodypart.weight * bodypart.com_pos[0])
-			com_y += (bodypart.weight * bodypart.com_pos[1])
-			mass += (bodypart.weight)
+		# Now work out where the top of the head goes
+		back = self.shoulder - self.hip
+		back /= norm(back)
+		self.top = self.shoulder + back * self.head_len
 
-		return (com_x/mass, com_y/mass)
+		self.com = self._find_com()
 
 	def _arm_len(self, attr):
 		"""Return an arm length in the plane of the bicycle"""
@@ -141,7 +133,24 @@ class Rider:
 			ret = sqrt(ret**2 - offset**2)
 		return ret
 
-	def display(self, frame = None):
+	def _find_com(self):
+		foot = array([0., 0.])
+		knee = self.hip/2
+
+		parts = []
+		for part, start, end in (
+				(LOWERLEG, foot, knee),
+				(UPPERLEG, knee, self.hip),
+				(TORSO, self.hip, self.shoulder),
+				(UPPERARM, self.elbow, self.shoulder),
+				(LOWERARM, self.wrist, self.elbow),
+				(HEAD, self.shoulder, self.top),
+				):
+			parts.append(BodyPart(part, start, end))
+
+		return com(parts)
+
+	def display(self, frame):
 		stack, reach = self.top_of_ht[1], self.top_of_ht[0]
 		print("You want a stack of {:.2f}mm and a reach of {:.2f}mm".format(
 			stack, reach))
@@ -151,21 +160,26 @@ class Rider:
 		angle = rad2deg(arccos(dot(back, array([1, 0]))))
 		print("Your back will be at an angle of {:.2f} deg "
 				"from horizontal".format(angle))
-		print(f"Your Center of Mass will be {self.center_of_mass_pos[0]:.2f}mm, relative to the bottom bracket")
 
-		if frame is not None:
-			rear_wheel = frame.left_cs.tube_top[0]
-			#use the rear wheel position as a datum
-			rear_wheel_distance = rear_wheel*-1
-			wheelbase = frame._fork_path()[-1][0] + rear_wheel_distance
-			
-			com_pos = rear_wheel_distance + self.center_of_mass_pos[0]
+		com_pos = self.com[0]
+		if com_pos > 0:
+			text, pos = "in front of", com_pos
+		else:
+			text, pos = "behind", -com_pos
+		print(f"Your centre of mass will be {pos:.2f}mm "
+			f"{text} the bottom bracket")
 
-			distribution = com_pos/wheelbase * 100
-			distribution_rear = 100 - distribution 
-			print(f"Your Front Wheel will be loaded {distribution:.2f}%, your rear Wheel {distribution_rear:.2f}")
+		if frame:
+			fw, rw = frame.front_wheel_pos()[0], frame.rear_wheel_pos()[0]
+			com_rel = com_pos - rw	# com relative to rear wheel.
+			ratio = com_rel / (fw - rw)
+			front_load = ratio * 100
+			rear_load = (1-ratio) * 100
+			print(f"Your front wheel will be loaded with {front_load:.2f}% and "
+				f"your rear wheel with {rear_load:.2f}% of the rider weight")
 
-	def draw(self, px_per_mm, frame = None):
+
+	def draw(self, px_per_mm):
 		inf = array([0, 0])
 
 		points = [inf.copy()]
@@ -177,21 +191,11 @@ class Rider:
 				sup[i] = max(sup[i], point[i])
 				inf[i] = min(inf[i], point[i])
 
-		if frame is not None:
-			frame_inf = array([frame.left_cs.tube_top[0], 0])
-			frame_sup = array([frame._fork_path()[-1][0], frame.head_tube.tube_top[1]])
-			for i in range(2):
-				inf[i] = min(inf[i], frame_inf[i])
-				sup[i] = max(frame_sup[i], sup[i])
-
 		render = Render(inf, sup, px_per_mm)
 		render.polyline(points, "black")
-		render.circle(self.center_of_mass_pos, 20, "red")
-		com_line = [self.center_of_mass_pos, (self.center_of_mass_pos[0], inf[1])]
-		render.polyline(com_line, "red")
 
-		if frame is not None:
-			render = frame.render_scale_diagram(render)
+		render.circle(self.com, 20, "red")
+		render.polyline([self.com, array([self.com[0], 0])], "red")
 
 		return render
 
@@ -208,20 +212,16 @@ def main():
 	config.read(args.config)
 	rider = Rider(config)
 
+	render = rider.draw(args.resolution)
 
+	frame = None
 	if args.frame_config:
 		frame_config = configparser.ConfigParser()
 		frame_config.read(args.frame_config)
 		frame = Frame(frame_config)
-	else:
-		frame = None
-	
-	rider.display(frame)
-	render = rider.draw(args.resolution, frame)
-
-	if frame is not None:
 		render = frame.render_scale_diagram(render)
 
+	rider.display(frame)
 	render.save("rider.png")
 	print("Rendered to rider.png")
 

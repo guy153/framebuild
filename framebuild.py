@@ -726,6 +726,12 @@ class Frame:
 		# only really working in 2D).
 		self.dt_bb_mitre_corner = self._calc_dt_bb_mitre_corner()
 
+	def rear_wheel_pos(self):
+		return array([self.left_drop.end[0], 0])
+
+	def front_wheel_pos(self):
+		return array([self._fork_path()[-1][0], 0])
+
 	def calc_wheel_geom(self):
 		"""Work out the trail and wheelbase. Easiest to do this together"""
 		ground = self.bb_drop - (self.wheel_diameter / 2 + self.tyre_height)
