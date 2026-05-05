@@ -27,7 +27,7 @@ def flex_rigidity(radius, wall, stiffness=200e9):
 	r2 /= 1000
 	r1 /= 1000
 
-	return 200e9 * (pi * (r2**4 - r1**4) / 4.0)
+	return stiffness * (pi * (r2**4 - r1**4) / 4.0)
 
 def mass(radius, wall, length, density=7850):
 	"""Return the mass in kg not worrying about butting"""
